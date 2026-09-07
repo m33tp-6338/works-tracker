@@ -542,22 +542,25 @@ function tripExpenses(id){
   return expenses.filter(x => x.trip_id === Number(id)).sort((a,b) => a.spent_on < b.spent_on ? 1 : -1);
 }
 
-function tripDetail(id){
-  const t = trips.find(x => x.id === Number(id));
-  if (!t) return;
-  const linkedTask = t.task_id ? tasks.find(x => x.id === t.task_id) : null;
-  const canDelete = t.created_by === me.id;
-  const ex = tripExpenses(id);
-  const total = ex.reduce((s,x) => s + Number(x.amount||0), 0);
-  const exRows = ex.map(x => `
+function expenseListHtml(tripId, ctx){
+  const ex = tripExpenses(tripId);
+  return ex.map(x => `
     <div class="cmt">
       <div class="cmt-h"><b>${esc(nameOf(x.partner_id))}</b><span>${fmt(x.spent_on)}</span></div>
       <p>${esc(x.category || "—")}${x.description ? " — " + esc(x.description) : ""}</p>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
         <span class="num" style="font-weight:600">${inr(x.amount)}</span>
-        ${x.created_by === me.id ? `<button class="x" style="font-size:15px" data-act="del-expense" data-id="${x.id}" data-trip="${id}">Delete</button>` : ""}
+        ${x.created_by === me.id ? `<button class="x" style="font-size:15px" data-act="del-expense" data-id="${x.id}" data-trip="${tripId}" data-ctx="${ctx}">Delete</button>` : ""}
       </div>
     </div>`).join("") || `<p class="empty" style="padding:10px 0">No expenses logged for this trip.</p>`;
+}
+
+function tripDetail(id){
+  const t = trips.find(x => x.id === Number(id));
+  if (!t) return;
+  const linkedTask = t.task_id ? tasks.find(x => x.id === t.task_id) : null;
+  const canDelete = t.created_by === me.id;
+  const total = tripExpenses(id).reduce((s,x) => s + Number(x.amount||0), 0);
 
   openSheet(tripRef(t), `
     <dl class="facts" style="margin-top:0;border-top:0;padding-top:0">
@@ -569,7 +572,7 @@ function tripDetail(id){
     </dl>
     ${t.notes ? `<div class="sec">Notes</div><p style="font-size:13.5px;color:var(--text-2)">${esc(t.notes)}</p>` : ""}
     <div class="sec">Expenses · ${inr(total)}</div>
-    ${exRows}
+    ${expenseListHtml(id, "detail")}
     <div class="actions">
       <button class="btn wide" data-act="expense" data-id="${t.id}">Add expense</button>
       <button class="btn ghost" data-act="export-xlsx" data-id="${t.id}">Export Excel</button>
@@ -698,21 +701,28 @@ function tripForm(){
     <div class="actions"><button class="btn solid wide" data-act="save-trip">Add trip</button></div>`);
 }
 
-function expenseForm(tripId){
+function expenseForm(tripId, opts){
+  opts = opts || {};
   const t = trips.find(x => x.id === Number(tripId));
+  const total = tripExpenses(tripId).reduce((s,x) => s + Number(x.amount||0), 0);
   openSheet("Add expense", `
     <p style="margin:0 0 14px;font-size:13.5px;color:var(--text-2)">${tripRef(t)} · ${esc(t.site || "Trip")}</p>
     <div class="field"><label>Spent by</label><select id="x-partner">
-      ${partners.map(p => `<option value="${p.id}" ${p.id===me.id?"selected":""}>${esc(p.name)}</option>`).join("")}
+      ${partners.map(p => `<option value="${p.id}" ${(opts.partner||me.id)===p.id?"selected":""}>${esc(p.name)}</option>`).join("")}
     </select></div>
     <div class="row2">
-      <div class="field"><label>Amount (₹)</label><input type="number" id="x-amount" min="0" step="0.01" placeholder="0.00"></div>
-      <div class="field"><label>Date</label><input type="date" id="x-date" value="${t.from_date || today()}"></div>
+      <div class="field"><label>Amount (₹)</label><input type="number" id="x-amount" min="0" step="0.01" placeholder="0.00" autofocus></div>
+      <div class="field"><label>Date</label><input type="date" id="x-date" value="${opts.date || t.from_date || today()}"></div>
     </div>
-    <div class="field"><label>Category</label><select id="x-cat">${expenseCatOptions(expenseCatList[0])}</select></div>
+    <div class="field"><label>Category</label><select id="x-cat">${expenseCatOptions(opts.cat || expenseCatList[0])}</select></div>
     <div class="field"><label>Description (optional)</label><input id="x-desc" placeholder="e.g. Taxi from station"></div>
-    <div class="msg" id="formMsg"></div>
-    <div class="actions"><button class="btn solid wide" data-act="save-expense" data-id="${tripId}">Add expense</button></div>`);
+    <div class="msg${opts.flash ? " ok" : ""}" id="formMsg">${opts.flash ? esc(opts.flash) : ""}</div>
+    <div class="actions">
+      <button class="btn solid wide" data-act="save-expense" data-id="${tripId}">Add &amp; add another</button>
+      <button class="btn ghost wide" data-act="view-trip" data-id="${tripId}">Done — back to trip</button>
+    </div>
+    <div class="sec">Added so far · ${inr(total)}</div>
+    ${expenseListHtml(tripId, "form")}`);
 }
 
 function tripExportRows(id){
@@ -822,6 +832,7 @@ document.addEventListener("click", async e => {
   if (a === "comment")     return commentForm(id);
   if (a === "edit")        return editForm(id);
   if (a === "expense")     return expenseForm(id);
+  if (a === "view-trip")   return tripDetail(id);
   if (a === "export-xlsx") return exportTripExcel(id);
   if (a === "export-pdf")  return exportTripPDF(id);
 
@@ -901,24 +912,27 @@ document.addEventListener("click", async e => {
     if (a === "save-expense") {
       const amount = Number($("x-amount").value);
       if (!amount || amount <= 0) throw new Error("Enter an amount.");
+      const partner = $("x-partner").value, cat = $("x-cat").value, date = $("x-date").value || today();
       const { error } = await sb.from("expenses").insert({
         trip_id: id,
-        partner_id: $("x-partner").value,
+        partner_id: partner,
         amount,
-        category: $("x-cat").value,
+        category: cat,
         description: $("x-desc").value.trim() || null,
-        spent_on: $("x-date").value || today(),
+        spent_on: date,
         created_by: me.id
       });
       if (error) throw error;
-      await loadExpenses(); tripDetail(id);
+      await loadExpenses();
+      expenseForm(id, { partner, cat, date, flash: "Added " + inr(amount) + "." });
     }
 
     if (a === "del-expense") {
-      const tripId = Number(act.dataset.trip);
+      const tripId = Number(act.dataset.trip), ctx = act.dataset.ctx;
       const { error } = await sb.from("expenses").delete().eq("id", id);
       if (error) throw error;
-      await loadExpenses(); tripDetail(tripId);
+      await loadExpenses();
+      if (ctx === "form") expenseForm(tripId); else tripDetail(tripId);
     }
   } catch (err) { fail(err); }
   finally { act.disabled = false; }
