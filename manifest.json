@@ -1,6 +1,6 @@
 {
-  "name": "Works Tracker",
-  "short_name": "Works",
+  "name": "Sitedesk",
+  "short_name": "Sitedesk",
   "description": "Shared tracker for pending work, follow-ups and responses.",
   "start_url": "./index.html",
   "scope": "./",
