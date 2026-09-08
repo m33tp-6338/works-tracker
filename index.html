@@ -236,7 +236,7 @@ const STATUS = {
   done:     { label:"Resolved",         cls:"p-done" }
 };
 
-let me = null, partners = [], tasks = [], trips = [], expenses = [], sitesList = [], categoriesList = [], expenseCatList = [];
+let me = null, partners = [], tasks = [], trips = [], expenses = [], points = [], sitesList = [], categoriesList = [], expenseCatList = [];
 let view = "tasks", filter = "all";
 const NEW_OPT = "__new__";
 
@@ -302,7 +302,7 @@ async function enter(){
   }
   $("app").style.display = "block";
   $("who").textContent = me.name + " · " + partners.length + " partners";
-  await Promise.all([loadLookups(), load(), loadTrips(), loadExpenses()]);
+  await Promise.all([loadLookups(), load(), loadTrips(), loadExpenses(), loadPoints()]);
   live();
 }
 
@@ -346,12 +346,19 @@ async function loadExpenses(){
   if (view === "trips") render();
 }
 
+async function loadPoints(){
+  const { data, error } = await sb.from("visit_points").select("*").order("noted_on", { ascending: false });
+  if (error) return;
+  points = data || [];
+  if (view === "trips") render();
+}
+
 let reloadTimer = null;
 function live(){
   sb.channel("sitedesk")
     .on("postgres_changes", { event:"*", schema:"public" }, () => {
       clearTimeout(reloadTimer);
-      reloadTimer = setTimeout(() => { loadLookups(); load(); loadTrips(); loadExpenses(); }, 400);
+      reloadTimer = setTimeout(() => { loadLookups(); load(); loadTrips(); loadExpenses(); loadPoints(); }, 400);
     })
     .subscribe();
 }
@@ -541,6 +548,20 @@ function detail(id){
 function tripExpenses(id){
   return expenses.filter(x => x.trip_id === Number(id)).sort((a,b) => a.spent_on < b.spent_on ? 1 : -1);
 }
+function tripPoints(id){
+  return points.filter(x => x.trip_id === Number(id))
+    .sort((a,b) => a.noted_on < b.noted_on ? 1 : (a.created_at < b.created_at ? 1 : -1));
+}
+function pointsListHtml(tripId, ctx){
+  const pts = tripPoints(tripId);
+  return pts.map(x => `
+    <div class="cmt">
+      <div class="cmt-h"><b>${esc(nameOf(x.created_by))}</b><span>${fmt(x.noted_on)}</span></div>
+      <p>${esc(x.note)}</p>
+      ${x.created_by === me.id ? `<div style="text-align:right;margin-top:4px">
+        <button class="x" style="font-size:15px" data-act="del-point" data-id="${x.id}" data-trip="${tripId}" data-ctx="${ctx}">Delete</button></div>` : ""}
+    </div>`).join("") || `<p class="empty" style="padding:10px 0">No points noted yet.</p>`;
+}
 
 function expenseListHtml(tripId, ctx){
   const ex = tripExpenses(tripId);
@@ -577,6 +598,12 @@ function tripDetail(id){
       <button class="btn wide" data-act="expense" data-id="${t.id}">Add expense</button>
       <button class="btn ghost" data-act="export-xlsx" data-id="${t.id}">Export Excel</button>
       <button class="btn ghost" data-act="export-pdf" data-id="${t.id}">Export PDF</button>
+    </div>
+    <div class="sec">Points for management</div>
+    ${pointsListHtml(id, "detail")}
+    <div class="actions">
+      <button class="btn wide" data-act="point" data-id="${t.id}">Add point</button>
+      <button class="btn ghost wide" data-act="export-points" data-id="${t.id}">Export points PDF</button>
       ${canDelete ? `<button class="btn ghost wide" data-act="del-trip" data-id="${t.id}">Delete trip</button>` : ""}
     </div>`);
 }
@@ -725,6 +752,41 @@ function expenseForm(tripId, opts){
     ${expenseListHtml(tripId, "form")}`);
 }
 
+function pointForm(tripId, opts){
+  opts = opts || {};
+  const t = trips.find(x => x.id === Number(tripId));
+  openSheet("Add point", `
+    <p style="margin:0 0 14px;font-size:13.5px;color:var(--text-2)">${tripRef(t)} · ${esc(t.site || "Trip")}</p>
+    <div class="field"><label>Date</label><input type="date" id="p-date" value="${opts.date || t.from_date || today()}"></div>
+    <div class="field"><label>Point to raise</label><textarea id="p-note" placeholder="e.g. Contractor short of cement at site, needs escalation"></textarea></div>
+    <div class="msg${opts.flash ? " ok" : ""}" id="formMsg">${opts.flash ? esc(opts.flash) : ""}</div>
+    <div class="actions">
+      <button class="btn solid wide" data-act="save-point" data-id="${tripId}">Add &amp; add another</button>
+      <button class="btn ghost wide" data-act="view-trip" data-id="${tripId}">Done — back to trip</button>
+    </div>
+    <div class="sec">Noted so far</div>
+    ${pointsListHtml(tripId, "form")}`);
+}
+
+function exportTripPoints(id){
+  const t = trips.find(x => x.id === Number(id));
+  const pts = tripPoints(id).slice().sort((a,b) => a.noted_on < b.noted_on ? -1 : 1);
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  doc.setFontSize(14); doc.text("Sitedesk — Points for management", 14, 16);
+  doc.setFontSize(10);
+  doc.text(`${tripRef(t)}  ·  ${t.site || ""}  ·  ${tripWhen(t)}  ·  ${nameOf(t.partner_id)}`, 14, 23);
+  doc.autoTable({
+    startY: 29,
+    head: [["Date","Point","Noted by"]],
+    body: pts.map(x => [fmt(x.noted_on), x.note, nameOf(x.created_by)]),
+    styles: { fontSize: 9, cellWidth: "wrap" },
+    columnStyles: { 1: { cellWidth: 110 } },
+    headStyles: { fillColor: [21,88,110] }
+  });
+  doc.save(`sitedesk-${tripRef(t).toLowerCase()}-points.pdf`);
+}
+
 function tripExportRows(id){
   const t = trips.find(x => x.id === Number(id));
   const ex = tripExpenses(id);
@@ -831,10 +893,12 @@ document.addEventListener("click", async e => {
   if (a === "log")         return logForm(id);
   if (a === "comment")     return commentForm(id);
   if (a === "edit")        return editForm(id);
-  if (a === "expense")     return expenseForm(id);
-  if (a === "view-trip")   return tripDetail(id);
-  if (a === "export-xlsx") return exportTripExcel(id);
-  if (a === "export-pdf")  return exportTripPDF(id);
+  if (a === "expense")      return expenseForm(id);
+  if (a === "point")        return pointForm(id);
+  if (a === "view-trip")    return tripDetail(id);
+  if (a === "export-xlsx")  return exportTripExcel(id);
+  if (a === "export-pdf")   return exportTripPDF(id);
+  if (a === "export-points") return exportTripPoints(id);
 
   act.disabled = true;
   try {
@@ -933,6 +997,26 @@ document.addEventListener("click", async e => {
       if (error) throw error;
       await loadExpenses();
       if (ctx === "form") expenseForm(tripId); else tripDetail(tripId);
+    }
+
+    if (a === "save-point") {
+      const note = $("p-note").value.trim();
+      if (!note) throw new Error("Write the point first.");
+      const date = $("p-date").value || today();
+      const { error } = await sb.from("visit_points").insert({
+        trip_id: id, note, noted_on: date, created_by: me.id
+      });
+      if (error) throw error;
+      await loadPoints();
+      pointForm(id, { date, flash: "Added." });
+    }
+
+    if (a === "del-point") {
+      const tripId = Number(act.dataset.trip), ctx = act.dataset.ctx;
+      const { error } = await sb.from("visit_points").delete().eq("id", id);
+      if (error) throw error;
+      await loadPoints();
+      if (ctx === "form") pointForm(tripId); else tripDetail(tripId);
     }
   } catch (err) { fail(err); }
   finally { act.disabled = false; }
